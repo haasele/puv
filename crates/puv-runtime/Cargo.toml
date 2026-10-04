@@ -1,0 +1,20 @@
+[package]
+name = "puv-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+miette.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+flate2.workspace = true
+tar.workspace = true
+sha2.workspace = true
+hex.workspace = true
+regex.workspace = true
+puv-core.workspace = true

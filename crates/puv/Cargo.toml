@@ -1,0 +1,37 @@
+[package]
+name = "puv"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "puv"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+miette.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde_json.workspace = true
+puv-core.workspace = true
+puv-semver.workspace = true
+puv-registry.workspace = true
+puv-runtime.workspace = true
+puv-resolver.workspace = true
+puv-cache.workspace = true
+puv-env.workspace = true
+puv-tool.workspace = true
+puv-contain.workspace = true
+puv-check.workspace = true
+puv-build.workspace = true
+puv-package.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+hex.workspace = true
+zip.workspace = true

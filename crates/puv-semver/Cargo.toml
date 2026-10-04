@@ -1,0 +1,11 @@
+[package]
+name = "puv-semver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+miette.workspace = true

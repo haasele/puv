@@ -1,0 +1,18 @@
+[package]
+name = "puv-check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+miette.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+regex.workspace = true
+rayon.workspace = true
+tree-sitter.workspace = true
+tree-sitter-php.workspace = true
+puv-core.workspace = true

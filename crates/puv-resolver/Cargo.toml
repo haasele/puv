@@ -1,0 +1,15 @@
+[package]
+name = "puv-resolver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+miette.workspace = true
+thiserror.workspace = true
+pubgrub.workspace = true
+puv-core.workspace = true
+puv-semver.workspace = true
+puv-registry.workspace = true
