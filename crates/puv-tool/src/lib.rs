@@ -45,12 +45,7 @@ pub fn link_tool_bins(bin_dir: &Path, tool_bin: &Path) -> Result<Vec<String>> {
             sh_quote(&entry.path().display().to_string())
         );
         fs::write(&dest, body).map_err(|err| Error::new(err.to_string()))?;
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&dest)
-            .map_err(|err| Error::new(err.to_string()))?
-            .permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&dest, perms).map_err(|err| Error::new(err.to_string()))?;
+        puv_core::make_executable(&dest).map_err(|err| Error::new(err.to_string()))?;
         linked.push(name.to_string());
     }
     linked.sort();

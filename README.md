@@ -8,23 +8,41 @@ puv does not shell out to Composer, and it does not load Composer plugins.
 
 ## Install
 
-Linux glibc, `x86_64` and `aarch64`. Runtimes are prebuilt StaticPHP CLI builds, not a compile of php-src.
+Linux and macOS:
+
+```shell
+curl -fsSL https://raw.githubusercontent.com/haasele/puv/main/install.sh | sh
+```
+
+Windows, in PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/haasele/puv/main/install.ps1 | iex
+```
+
+Both scripts pick the archive for this machine and install it to `${PUV_INSTALL_DIR:-$HOME/.local/bin}` (`%USERPROFILE%\.local\bin` on Windows). The PowerShell script adds that directory to the user PATH. From a clone:
 
 ```shell
 cargo install --path crates/puv --locked
 ```
 
-Rust 1.92 or newer. The binary is `puv`.
+Rust 1.92 or newer.
 
-Release builds are published from the Actions tab (Release → Run workflow). The installer reads the latest GitHub release:
+Release builds are published from the Actions tab (Release → Run workflow). Both installers read the latest GitHub release:
 
 ```text
 puv-x86_64-unknown-linux-gnu.tar.gz
 puv-aarch64-unknown-linux-gnu.tar.gz
+puv-x86_64-apple-darwin.tar.gz
+puv-aarch64-apple-darwin.tar.gz
+puv-x86_64-pc-windows-msvc.tar.gz
+puv-aarch64-pc-windows-msvc.tar.gz
 sha256sums.txt
 ```
 
-Each archive contains a single `puv` binary. `sha256sums.txt` is `sha256sum` output: the hash, two spaces, then the file name.
+Each archive contains one binary: `puv`, or `puv.exe` on Windows. `sha256sums.txt` is `sha256sum` output: the hash, two spaces, then the file name.
+
+PHP runtimes are prebuilt StaticPHP CLI builds for Linux glibc (`x86_64` and `aarch64`), not a compile of php-src.
 
 ## A new project
 

@@ -1,6 +1,7 @@
 //! Project model, paths, manifest, and lockfile.
 
 mod error;
+mod fsutil;
 mod hash;
 mod lockfile;
 mod manifest;
@@ -11,6 +12,7 @@ mod spinner;
 mod style;
 
 pub use error::{Error, Result};
+pub use fsutil::{link_path, make_executable};
 pub use hash::{content_hash, sha256_hex, sha256_prefixed};
 pub use lockfile::{
     LOCK_VERSION, LockFile, LockedPackage, LockedRuntime, LockedTool, load_lockb, write_lockb,

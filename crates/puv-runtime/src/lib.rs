@@ -295,7 +295,7 @@ pub fn install(dirs: &Dirs, artifact: &Artifact) -> Result<PathBuf> {
             ))
         })?;
         if found != php {
-            std::os::unix::fs::symlink(&found, &php)
+            puv_core::link_path(&found, &php)
                 .map_err(|err| Error::new(format!("failed to link php binary: {err}")))?;
         }
         fs::write(dest.join("extensions.txt"), artifact.extensions.join("\n")).ok();
@@ -638,14 +638,8 @@ fn visit(dir: &Path, visit_file: &mut dyn FnMut(&Path)) -> std::io::Result<()> {
 }
 
 fn ensure_executable(path: &Path) -> Result<()> {
-    let meta = fs::metadata(path)
-        .map_err(|err| Error::new(format!("failed to stat {}: {err}", path.display())))?;
-    let mut perms = meta.permissions();
-    use std::os::unix::fs::PermissionsExt;
-    perms.set_mode(perms.mode() | 0o755);
-    fs::set_permissions(path, perms)
-        .map_err(|err| Error::new(format!("failed to mark php executable: {err}")))?;
-    Ok(())
+    puv_core::make_executable(path)
+        .map_err(|err| Error::new(format!("failed to mark php executable: {err}")))
 }
 
 fn http_client() -> Result<reqwest::blocking::Client> {

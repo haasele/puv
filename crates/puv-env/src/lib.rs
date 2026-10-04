@@ -2,7 +2,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -197,7 +196,7 @@ fn link_package(deps: &Path, name: &str, target: &Path) -> Result<()> {
             fs::remove_file(&dest).map_err(|err| Error::new(err.to_string()))?;
         }
     }
-    symlink(target, &dest).map_err(|err| {
+    puv_core::link_path(target, &dest).map_err(|err| {
         Error::new(format!(
             "failed to link {} -> {}: {err}",
             dest.display(),
@@ -359,12 +358,7 @@ fn write_script(path: &Path, body: &str) -> Result<()> {
         fs::create_dir_all(parent).map_err(|err| Error::new(err.to_string()))?;
     }
     fs::write(path, body).map_err(|err| Error::new(err.to_string()))?;
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = fs::metadata(path)
-        .map_err(|err| Error::new(err.to_string()))?
-        .permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(path, perms).map_err(|err| Error::new(err.to_string()))
+    puv_core::make_executable(path).map_err(|err| Error::new(err.to_string()))
 }
 
 fn scan_classmap(root: &Path, paths: &[String]) -> Vec<(String, String)> {

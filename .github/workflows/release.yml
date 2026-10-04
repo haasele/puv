@@ -12,17 +12,38 @@ on:
 jobs:
   build:
     name: ${{ matrix.target }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
-            linker: ""
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            bin: puv
             strip: strip
-          - target: aarch64-unknown-linux-gnu
-            linker: aarch64-linux-gnu-gcc
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            bin: puv
             strip: aarch64-linux-gnu-strip
+            cross: true
+            linker: aarch64-linux-gnu-gcc
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            bin: puv
+            strip: strip
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            bin: puv
+            strip: strip
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin: puv.exe
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            bin: puv.exe
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -30,23 +51,39 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       - name: cross compiler
-        if: matrix.linker != ''
+        if: matrix.cross
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: MSVC ARM64 tools
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $arm = Get-ChildItem -Path "$vs\VC\Tools\MSVC" -Filter link.exe -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '\\bin\\Hostx64\\arm64\\link.exe$' } |
+            Select-Object -First 1
+          if ($arm) { exit 0 }
+          $installer = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+          & $installer modify --installPath $vs --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --quiet --norestart --wait
       - name: build
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.linker }}
           CC_aarch64_unknown_linux_gnu: ${{ matrix.linker }}
         run: cargo build --release --locked --target ${{ matrix.target }} -p puv
       - name: package
+        env:
+          COPYFILE_DISABLE: "1"
         run: |
-          bin="target/${{ matrix.target }}/release/puv"
-          ${{ matrix.strip }} "$bin"
+          bin="target/${{ matrix.target }}/release/${{ matrix.bin }}"
+          if [ -n "${{ matrix.strip }}" ]; then
+            ${{ matrix.strip }} "$bin"
+          fi
           stage="$(mktemp -d)"
-          cp "$bin" "$stage/puv"
-          chmod 755 "$stage/puv"
-          tar -C "$stage" -czf "puv-${{ matrix.target }}.tar.gz" puv
+          cp "$bin" "$stage/${{ matrix.bin }}"
+          chmod 755 "$stage/${{ matrix.bin }}"
+          tar -C "$stage" -czf "puv-${{ matrix.target }}.tar.gz" "${{ matrix.bin }}"
       - uses: actions/upload-artifact@v4
         with:
           name: puv-${{ matrix.target }}
@@ -73,7 +110,18 @@ jobs:
             v[0-9]*.[0-9]*.[0-9]*) ;;
             *) echo "tag must look like v0.1.0" >&2; exit 1 ;;
           esac
-          sha256sum puv-*.tar.gz > sha256sums.txt
+          files="
+          puv-x86_64-unknown-linux-gnu.tar.gz
+          puv-aarch64-unknown-linux-gnu.tar.gz
+          puv-x86_64-apple-darwin.tar.gz
+          puv-aarch64-apple-darwin.tar.gz
+          puv-x86_64-pc-windows-msvc.tar.gz
+          puv-aarch64-pc-windows-msvc.tar.gz
+          "
+          for name in $files; do
+            [ -f "$name" ] || { echo "missing $name" >&2; exit 1; }
+          done
+          sha256sum $files > sha256sums.txt
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag }}
@@ -82,5 +130,9 @@ jobs:
           files: |
             dist/puv-x86_64-unknown-linux-gnu.tar.gz
             dist/puv-aarch64-unknown-linux-gnu.tar.gz
+            dist/puv-x86_64-apple-darwin.tar.gz
+            dist/puv-aarch64-apple-darwin.tar.gz
+            dist/puv-x86_64-pc-windows-msvc.tar.gz
+            dist/puv-aarch64-pc-windows-msvc.tar.gz
             dist/sha256sums.txt
           fail_on_unmatched_files: true
