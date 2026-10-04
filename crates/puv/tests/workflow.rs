@@ -27,8 +27,8 @@ fn puv() -> PathBuf {
 }
 
 impl World {
-    fn run(&self, dir: &Path, args: &[&str]) -> Output {
-        let output = Command::new(puv())
+    fn output(&self, dir: &Path, args: &[&str]) -> Output {
+        Command::new(puv())
             .current_dir(dir)
             .args(args)
             .env("PUV_CACHE_DIR", &self.cache)
@@ -38,7 +38,11 @@ impl World {
             .env("PUV_REGISTRY_URL", &self.registry)
             .env("RUST_LOG", "warn")
             .output()
-            .unwrap();
+            .unwrap()
+    }
+
+    fn run(&self, dir: &Path, args: &[&str]) -> Output {
+        let output = self.output(dir, args);
         if !output.status.success() {
             eprintln!("cmd {args:?} failed");
             eprintln!("stdout {}", String::from_utf8_lossy(&output.stdout));
@@ -153,6 +157,13 @@ fn release(
         "version": version,
         "version_normalized": format!("{version}.0"),
         "require": require,
+        "description": "Fixture package",
+        "keywords": ["fixture"],
+        "homepage": "https://example.test/package",
+        "license": ["MIT"],
+        "type": "library",
+        "time": "2024-01-02T00:00:00+00:00",
+        "authors": [{"name": "Ada", "email": "ada@example.test"}],
         "autoload": {"psr-4": {prefix: "src/"}},
         "dist": {"type": "zip", "url": url, "shasum": shasum}
     });
@@ -315,6 +326,35 @@ fn fixture_world() -> (World, PathBuf) {
             )],
         ),
     );
+    let skeleton = zip_bytes(&[
+        (
+            "composer.json",
+            r#"{"name":"laravel/laravel","require":{"php":">=8.2"}}"#,
+        ),
+        ("public/index.php", "<?php\necho \"laravel-skeleton\\n\";\n"),
+    ]);
+    let skeleton_sum = sha1_hex(&skeleton);
+    let skeleton_url = format!("{base}/dist/laravel.zip");
+    routes.insert("/dist/laravel.zip".into(), skeleton);
+    routes.insert(
+        "/p2/laravel/laravel.json".into(),
+        metadata(
+            "laravel/laravel",
+            &[release(
+                "laravel/laravel",
+                "11.0.0",
+                serde_json::json!({"php": ">=8.2"}),
+                &skeleton_url,
+                &skeleton_sum,
+                "App\\",
+                None,
+            )],
+        ),
+    );
+    routes.insert(
+        "/api/security-advisories".into(),
+        br#"{"advisories":{"acme/lib":[{"advisoryId":"PKSA-test","packageName":"acme/lib","title":"demo hole","link":"https://example.test/advisory","cve":"CVE-2026-1","affectedVersions":"<1.2.0","severity":"high"}]}}"#.to_vec(),
+    );
     routes.insert(
         "/p2/widget/two.json".into(),
         metadata(
@@ -411,6 +451,22 @@ fn serve_on(port: u16, routes: HashMap<String, Vec<u8>>) -> World {
 }
 
 #[test]
+fn init_creates_a_named_directory() {
+    let (world, _) = fixture_world();
+    let dir = tempfile::tempdir().unwrap();
+    let output = world.run(dir.path(), &["init", "demo"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(dir.path().join("demo/puv.toml").is_file());
+    assert!(dir.path().join("demo/src/main.php").is_file());
+    let manifest = fs::read_to_string(dir.path().join("demo/puv.toml")).unwrap();
+    assert!(manifest.contains("name = \"demo\""));
+}
+
+#[test]
 fn init_refuses_a_second_run_without_force() {
     let (world, _) = fixture_world();
     let dir = tempfile::tempdir().unwrap();
@@ -485,6 +541,106 @@ fn add_and_sync_share_the_package_cache() {
 }
 
 #[test]
+fn use_rewrites_the_project_php_shim() {
+    let (world, _) = fixture_world();
+    let dir = tempfile::tempdir().unwrap();
+    assert!(world.run(dir.path(), &["init"]).status.success());
+    assert!(world.run(dir.path(), &["use", "8.4"]).status.success());
+    let manifest = fs::read_to_string(dir.path().join("puv.toml")).unwrap();
+    assert!(manifest.contains("php = \"8.4.23\""), "{manifest}");
+    let first = fs::read_to_string(dir.path().join(".puv/bin/php")).unwrap();
+    assert!(first.contains("runtimes/8.4.23/php"), "{first}");
+
+    let archive = world.index.parent().unwrap().join("php-8.4.23.tar.gz");
+    let sha = hex::encode(Sha256::digest(fs::read(&archive).unwrap()));
+    fs::write(
+        &world.index,
+        format!(
+            r#"[{{"version":"8.4.23","target":"x86_64-unknown-linux-gnu","url":"file://{}","sha256":"{sha}","extensions":["ctype","dom","json","mbstring","phar","tokenizer","xml"]}},{{"version":"8.3.1","target":"x86_64-unknown-linux-gnu","url":"file://{}","sha256":"{sha}","extensions":["ctype","dom","json","mbstring","phar","tokenizer","xml"]}}]"#,
+            archive.display(),
+            archive.display()
+        ),
+    )
+    .unwrap();
+    let switched = world.run(dir.path(), &["use", "8.3"]);
+    assert!(
+        switched.status.success(),
+        "{}",
+        String::from_utf8_lossy(&switched.stderr)
+    );
+    let manifest = fs::read_to_string(dir.path().join("puv.toml")).unwrap();
+    assert!(manifest.contains("php = \"8.3.1\""), "{manifest}");
+    let second = fs::read_to_string(dir.path().join(".puv/bin/php")).unwrap();
+    assert!(second.contains("runtimes/8.3.1/php"), "{second}");
+    assert!(!second.contains("runtimes/8.4.23/php"));
+}
+
+#[test]
+fn php_list_install_and_remove_follow_the_requested_line() {
+    let (world, _) = fixture_world();
+    let dir = tempfile::tempdir().unwrap();
+    assert!(world.run(dir.path(), &["init"]).status.success());
+    must(&world, dir.path(), &["use", "8.4"]);
+    let archive = world.index.parent().unwrap().join("php-8.4.23.tar.gz");
+    let sha = hex::encode(Sha256::digest(fs::read(&archive).unwrap()));
+    let entry = |version: &str| {
+        format!(
+            r#"{{"version":"{version}","target":"x86_64-unknown-linux-gnu","url":"file://{}","sha256":"{sha}","extensions":["json"]}}"#,
+            archive.display()
+        )
+    };
+    fs::write(
+        &world.index,
+        format!(
+            "[{},{},{}]",
+            entry("8.4.1"),
+            entry("8.4.23"),
+            entry("8.3.1")
+        ),
+    )
+    .unwrap();
+
+    let listed = must(&world, dir.path(), &["php", "list"]);
+    assert!(listed.contains("8.4.23  installed"), "{listed}");
+    assert!(!listed.contains("8.4.1"), "{listed}");
+    assert!(!listed.contains("installation required"), "{listed}");
+
+    let all = must(&world, dir.path(), &["php", "list", "--all"]);
+    assert!(all.contains("8.4.23  installed"), "{all}");
+    assert!(all.contains("8.4.1  installation required"), "{all}");
+    assert!(all.contains("8.3.1  installation required"), "{all}");
+
+    let line = must(&world, dir.path(), &["php", "install", "8.4", "--all"]);
+    assert!(line.contains("installed php 8.4.1"), "{line}");
+    assert!(line.contains("installed php 8.4.23"), "{line}");
+    assert!(!line.contains("8.3.1"), "{line}");
+    assert!(world.data.join("runtimes/8.4.1/php").is_file());
+    assert!(!world.data.join("runtimes/8.3.1/php").exists());
+
+    must(&world, dir.path(), &["php", "install", "--all"]);
+    assert!(world.data.join("runtimes/8.3.1/php").is_file());
+
+    let exact = must(&world, dir.path(), &["php", "remove", "8.4.23"]);
+    assert_eq!(exact.trim(), "removed php 8.4.23");
+    assert!(world.data.join("runtimes/8.4.1/php").is_file());
+
+    let minor = must(&world, dir.path(), &["php", "remove", "8.4"]);
+    assert!(minor.contains("removed php 8.4.1"), "{minor}");
+    assert!(!minor.contains("8.4.23"), "{minor}");
+    assert!(world.data.join("runtimes/8.3.1/php").is_file());
+    assert!(!world.data.join("runtimes/8.4.1").exists());
+
+    must(&world, dir.path(), &["php", "remove", "--all"]);
+    assert!(!world.data.join("runtimes/8.3.1").exists());
+    let empty = must(&world, dir.path(), &["php", "list"]);
+    assert!(empty.trim().is_empty(), "{empty}");
+    let again = must(&world, dir.path(), &["php", "list", "--all"]);
+    assert!(again.contains("8.4.23  installation required"), "{again}");
+    assert!(again.contains("8.3.1  installation required"), "{again}");
+    assert!(!again.contains("installed"), "{again}");
+}
+
+#[test]
 fn run_inline_and_direct_execution_use_the_project_runtime() {
     let (world, _) = fixture_world();
     let dir = tempfile::tempdir().unwrap();
@@ -505,6 +661,13 @@ fn run_inline_and_direct_execution_use_the_project_runtime() {
     let direct = world.run(dir.path(), &["src/main.php"]);
     assert!(direct.status.success());
     assert_eq!(ran.stdout, direct.stdout);
+    let nested = world.run(&dir.path().join("src"), &["run", "main.php"]);
+    assert!(
+        nested.status.success(),
+        "{}",
+        String::from_utf8_lossy(&nested.stderr)
+    );
+    assert!(String::from_utf8_lossy(&nested.stdout).contains("Hello from"));
     let managed = world.data.join("runtimes/8.4.23/php");
     let listed = Command::new(&managed).arg("-v").output().unwrap();
     assert!(String::from_utf8_lossy(&listed.stdout).contains("8.4.23"));
@@ -606,6 +769,31 @@ fn contain_keeps_composer_files_and_syncs_the_locked_versions() {
 }
 
 #[test]
+fn contain_resolves_when_composer_lock_is_missing() {
+    let (world, _) = fixture_world();
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("composer.json"),
+        r#"{"name":"acme/demo","require":{"php":">=8.2","acme/lib":"^1.0"}}"#,
+    )
+    .unwrap();
+    let result = world.run(dir.path(), &["contain"]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(String::from_utf8_lossy(&result.stderr).contains("no composer.lock"));
+    let lock = fs::read_to_string(dir.path().join("puv.lock")).unwrap();
+    assert!(lock.contains("acme/lib"));
+    assert!(lock.contains("1.2.0"));
+    assert!(dir.path().join("composer.json").is_file());
+    assert!(!dir.path().join("composer.lock").exists());
+    assert!(world.run(dir.path(), &["sync"]).status.success());
+    assert!(dir.path().join(".puv/deps/acme/lib").exists());
+}
+
+#[test]
 fn check_reports_syntax_errors_and_a_drifted_lock() {
     let (world, _) = fixture_world();
     let dir = tempfile::tempdir().unwrap();
@@ -615,6 +803,11 @@ fn check_reports_syntax_errors_and_a_drifted_lock() {
         clean.status.success(),
         "{}",
         String::from_utf8_lossy(&clean.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&clean.stdout).contains("no issues"),
+        "{}",
+        String::from_utf8_lossy(&clean.stdout)
     );
     fs::write(dir.path().join("src/broken.php"), "<?php\nclass {\n").unwrap();
     let broken = world.run(dir.path(), &["check"]);
@@ -670,6 +863,44 @@ fn build_pipeline_is_distinct_from_the_project_script() {
         String::from_utf8_lossy(&script.stderr)
     );
     assert!(String::from_utf8_lossy(&script.stdout).contains("no"));
+}
+
+#[test]
+fn build_without_a_script_writes_the_package() {
+    let (world, _) = fixture_world();
+    let dir = tempfile::tempdir().unwrap();
+    assert!(world.run(dir.path(), &["init"]).status.success());
+    let built = world.run(dir.path(), &["build"]);
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&built.stdout);
+    assert!(stdout.contains("built "));
+    assert!(stdout.contains(".phar"));
+    let dist = fs::read_dir(dir.path().join("dist")).unwrap();
+    let produced: Vec<_> = dist.map(|entry| entry.unwrap().path()).collect();
+    assert_eq!(produced.len(), 1);
+    let bytes = fs::read(&produced[0]).unwrap();
+    assert!(bytes.windows(4).any(|window| window == b"GBMB"));
+    assert!(
+        bytes
+            .windows(b"Hello from".len())
+            .any(|window| window == b"Hello from")
+    );
+    if Path::new("/usr/bin/php").is_file() {
+        let ran = Command::new("/usr/bin/php")
+            .arg(&produced[0])
+            .output()
+            .unwrap();
+        assert!(
+            ran.status.success(),
+            "{}",
+            String::from_utf8_lossy(&ran.stderr)
+        );
+        assert!(String::from_utf8_lossy(&ran.stdout).contains("Hello from"));
+    }
 }
 
 #[test]
@@ -744,4 +975,295 @@ fn warm_run_reuses_lockb_until_the_lock_changes() {
         "{}",
         String::from_utf8_lossy(&third.stderr)
     );
+}
+
+fn must(world: &World, dir: &Path, args: &[&str]) -> String {
+    let output = world.run(dir, args);
+    assert!(
+        output.status.success(),
+        "{args:?}\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn stage(name: &str) {
+    eprintln!("\n== {name} ==");
+}
+
+/// One pass through the CLI: a Composer project with no PUV files, a project
+/// created by `puv init`, a global tool, build and every package format, checks,
+/// add/install/remove, load, contain, and prune.
+#[test]
+fn end_to_end_pipeline() {
+    let (world, _) = fixture_world();
+    let work = tempfile::tempdir().unwrap();
+    let neutral = work.path();
+
+    stage("old composer project, no puv files");
+    let legacy = neutral.join("legacy");
+    fs::create_dir_all(&legacy).unwrap();
+    fs::write(
+        legacy.join("composer.json"),
+        r#"{"name":"acme/legacy","require":{"php":">=8.2","acme/lib":"^1.0"},"scripts":{"test":"phpunit","weird":"@composer dump-autoload"}}"#,
+    )
+    .unwrap();
+    let archive = zip_bytes(&[
+        (
+            "lib/src/Hello.php",
+            "<?php\nnamespace Acme\\Lib;\nclass Hello { public const MSG = \"from-lib\"; }\n",
+        ),
+        ("lib/composer.json", "{\"name\":\"acme/lib\"}\n"),
+    ]);
+    let sum = sha1_hex(&archive);
+    let lib_url = format!("{}/dist/lib.zip", world.registry);
+    fs::write(
+        legacy.join("composer.lock"),
+        format!(
+            r#"{{"packages":[{{"name":"acme/lib","version":"1.0.0","version_normalized":"1.0.0.0","dist":{{"type":"zip","url":"{lib_url}","shasum":"{sum}"}},"require":{{"php":">=8.1"}},"autoload":{{"psr-4":{{"Acme\\\\Lib\\\\":"src/"}}}}}}],"packages-dev":[]}}"#
+        ),
+    )
+    .unwrap();
+    assert!(!legacy.join("puv.toml").exists());
+
+    stage("new project");
+    let created = must(&world, neutral, &["init", "app"]);
+    assert!(created.contains("initialized app"));
+    let app = neutral.join("app");
+    assert!(app.join("puv.toml").is_file());
+    assert!(app.join("src/main.php").is_file());
+    assert!(!app.join("composer.json").exists());
+
+    stage("runtime");
+    must(&world, neutral, &["use", "--global", "8.4"]);
+    must(&world, &app, &["use", "8.4"]);
+    let listed = must(&world, &app, &["php", "list"]);
+    assert!(listed.contains("8.4.23  installed"), "{listed}");
+    let version = must(&world, &app, &["-c", "echo PHP_VERSION;"]);
+    assert_eq!(version.trim(), "8.4.23");
+
+    stage("global tool install, run, uninstall");
+    must(&world, neutral, &["tool", "install", "widget/one"]);
+    let tools = must(&world, neutral, &["tool", "list"]);
+    assert!(tools.contains("widget/one"), "{tools}");
+    let shim = world.bins.join("widget-one");
+    assert!(shim.is_file(), "missing tool shim {}", shim.display());
+    if Path::new("/usr/bin/php").is_file() {
+        let ran = Command::new(&shim).output().unwrap();
+        assert!(
+            ran.status.success(),
+            "{}",
+            String::from_utf8_lossy(&ran.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&ran.stdout).trim(), "lib-1");
+    }
+    must(&world, neutral, &["tool", "uninstall", "widget/one"]);
+    assert!(!shim.exists());
+    assert!(!world.data.join("tools/widget-one").exists());
+    let tools = must(&world, neutral, &["tool", "list"]);
+    assert!(!tools.contains("widget/one"), "{tools}");
+
+    stage("build and package every format");
+    let built = must(&world, &app, &["build"]);
+    let phar = app.join("dist/app.phar");
+    assert!(built.contains(phar.to_str().unwrap()), "{built}");
+    assert!(phar.is_file());
+    if Path::new("/usr/bin/php").is_file() {
+        let ran = Command::new("/usr/bin/php").arg(&phar).output().unwrap();
+        assert!(
+            ran.status.success(),
+            "{}",
+            String::from_utf8_lossy(&ran.stderr)
+        );
+        assert!(String::from_utf8_lossy(&ran.stdout).contains("Hello from app"));
+    }
+    let zipped = must(&world, &app, &["package", "--format", "zip"]);
+    let zip_path = app.join("dist/app.zip");
+    assert!(zipped.contains(zip_path.to_str().unwrap()), "{zipped}");
+    let zip_file = fs::File::open(&zip_path).unwrap();
+    let mut archive = zip::ZipArchive::new(zip_file).unwrap();
+    let names: Vec<String> = (0..archive.len())
+        .map(|index| archive.by_index(index).unwrap().name().to_string())
+        .collect();
+    assert!(names.iter().any(|name| name == "src/main.php"), "{names:?}");
+    let packed = must(&world, &app, &["package", "--format", "tar"]);
+    let tar_path = app.join("dist/app.tar.gz");
+    assert!(packed.contains(tar_path.to_str().unwrap()), "{packed}");
+    let listed = Command::new("tar")
+        .args(["-tzf"])
+        .arg(&tar_path)
+        .output()
+        .unwrap();
+    assert!(listed.status.success());
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("src/main.php"));
+
+    stage("check a clean project");
+    let report = must(&world, &app, &["check", "--format", "json"]);
+    assert!(report.contains("\"diagnostics\": []"), "{report}");
+
+    stage("add, install, remove");
+    must(&world, &app, &["add", "acme/lib"]);
+    fs::write(
+        app.join("src/main.php"),
+        "<?php\ndeclare(strict_types=1);\nfwrite(STDOUT, Acme\\Lib\\Hello::MSG . \"\\n\");\n",
+    )
+    .unwrap();
+    if Path::new("/usr/bin/php").is_file() {
+        let ran = must(&world, &app, &["run", "src/main.php"]);
+        assert!(ran.contains("from-lib"), "{ran}");
+    }
+    fs::remove_dir_all(app.join(".puv")).unwrap();
+    must(&world, &app, &["install"]);
+    assert!(app.join(".puv/deps/acme/lib").is_dir());
+    must(&world, &app, &["add", "--dev", "widget/one"]);
+    let manifest = fs::read_to_string(app.join("puv.toml")).unwrap();
+    assert!(manifest.contains("widget/one"), "{manifest}");
+    must(&world, &app, &["remove", "widget/one"]);
+    let manifest = fs::read_to_string(app.join("puv.toml")).unwrap();
+    assert!(!manifest.contains("widget/one"), "{manifest}");
+    assert!(manifest.contains("acme/lib"), "{manifest}");
+
+    stage("load a project tool");
+    must(&world, &app, &["load", "widget/two"]);
+    if Path::new("/usr/bin/php").is_file() {
+        let ran = must(&world, &app, &["run", "widget-two"]);
+        assert!(ran.contains("lib-2"), "{ran}");
+    } else {
+        assert!(app.join(".puv/tools").read_dir().unwrap().next().is_some());
+    }
+
+    stage("check failures and recovery");
+    fs::write(app.join("src/broken.php"), "<?php\nclass {\n").unwrap();
+    let broken = world.output(&app, &["check"]);
+    assert!(!broken.status.success());
+    assert!(String::from_utf8_lossy(&broken.stdout).contains("syntax.error"));
+    fs::remove_file(app.join("src/broken.php")).unwrap();
+    let saved = fs::read_to_string(app.join("puv.toml")).unwrap();
+    assert!(saved.contains("php = \"8.4.23\""), "{saved}");
+    let drifted = saved.replace("php = \"8.4.23\"", "php = \"8.3\"");
+    fs::write(app.join("puv.toml"), drifted).unwrap();
+    let drifted = world.output(&app, &["check"]);
+    assert!(!drifted.status.success());
+    assert!(String::from_utf8_lossy(&drifted.stdout).contains("project.lock-outdated"));
+    fs::write(app.join("puv.toml"), saved).unwrap();
+    must(&world, &app, &["check"]);
+
+    stage("contain a locked composer project");
+    let contained = must(&world, &legacy, &["contain"]);
+    assert!(contained.contains("contained 1 packages"), "{contained}");
+    assert!(legacy.join("composer.json").is_file());
+    assert!(legacy.join("composer.lock").is_file());
+    let lock = fs::read_to_string(legacy.join("puv.lock")).unwrap();
+    assert!(lock.contains("1.0.0"), "{lock}");
+    assert!(!lock.contains("1.2.0"), "{lock}");
+    let manifest = fs::read_to_string(legacy.join("puv.toml")).unwrap();
+    assert!(manifest.contains("\"test\" = \"phpunit\""), "{manifest}");
+    must(&world, &legacy, &["sync"]);
+    assert!(legacy.join(".puv/deps/acme/lib").is_dir());
+
+    stage("contain without a lock, then clean");
+    let fresh = neutral.join("fresh");
+    fs::create_dir_all(&fresh).unwrap();
+    fs::write(
+        fresh.join("composer.json"),
+        r#"{"name":"acme/fresh","require":{"php":">=8.2","acme/lib":"^1.0"}}"#,
+    )
+    .unwrap();
+    let migrated = world.run(&fresh, &["contain"]);
+    assert!(
+        migrated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&migrated.stderr)
+    );
+    assert!(String::from_utf8_lossy(&migrated.stderr).contains("no composer.lock"));
+    let lock = fs::read_to_string(fresh.join("puv.lock")).unwrap();
+    assert!(lock.contains("1.2.0"), "{lock}");
+    fs::remove_dir_all(&fresh).unwrap();
+    fs::create_dir_all(&fresh).unwrap();
+    fs::write(
+        fresh.join("composer.json"),
+        r#"{"name":"acme/fresh","require":{"php":">=8.2"}}"#,
+    )
+    .unwrap();
+    must(&world, &fresh, &["contain", "--clean"]);
+    assert!(!fresh.join("composer.json").exists());
+    assert!(fresh.join("puv.toml").is_file());
+
+    stage("prune unreferenced cache entries");
+    let orphan = world.cache.join("packages/orphan");
+    fs::create_dir_all(&orphan).unwrap();
+    fs::write(orphan.join("marker"), b"x").unwrap();
+    let pruned = must(&world, neutral, &["prune", "--global"]);
+    assert!(pruned.contains("removed"), "{pruned}");
+    assert!(!orphan.exists());
+    assert!(app.join(".puv/deps/acme/lib").is_dir());
+    assert!(legacy.join(".puv/deps/acme/lib").is_dir());
+
+    stage("remove the runtime");
+    let removed = must(&world, neutral, &["php", "remove", "8.4"]);
+    assert!(removed.contains("removed php 8.4.23"), "{removed}");
+    let listed = must(&world, neutral, &["php", "list"]);
+    assert!(!listed.contains("8.4.23"), "{listed}");
+}
+
+#[test]
+fn create_builds_a_template_and_contains_it() {
+    let (world, _) = fixture_world();
+    let dir = tempfile::tempdir().unwrap();
+    let created = must(&world, dir.path(), &["create", "laravel", "blog"]);
+    assert!(created.contains("laravel/laravel 11.0.0"), "{created}");
+    let blog = dir.path().join("blog");
+    assert!(blog.join("public/index.php").is_file());
+    assert!(blog.join("composer.json").is_file());
+    assert!(blog.join("puv.toml").is_file());
+    assert!(blog.join("puv.lock").is_file());
+    let missing = world.output(dir.path(), &["create"]);
+    assert!(!missing.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("template"),
+        "{}",
+        String::from_utf8_lossy(&missing.stderr)
+    );
+}
+
+#[test]
+fn list_why_info_and_audit_describe_the_graph() {
+    let (world, _) = fixture_world();
+    let dir = tempfile::tempdir().unwrap();
+    assert!(world.run(dir.path(), &["init"]).status.success());
+    must(&world, dir.path(), &["add", "acme/lib:1.0.0"]);
+    let listed = must(&world, dir.path(), &["list"]);
+    assert!(listed.contains("php@8.4.23"), "{listed}");
+    assert!(listed.contains("ext-json"), "{listed}");
+    assert!(listed.contains("acme/lib@1.0.0"), "{listed}");
+    let why = must(&world, dir.path(), &["why", "acme/lib"]);
+    assert!(why.contains("depends on acme/lib 1.0.0"), "{why}");
+    let ext = must(&world, dir.path(), &["why", "ext-json"]);
+    assert!(ext.contains("php@8.4.23 provides it"), "{ext}");
+    let info = must(&world, dir.path(), &["info", "acme/lib"]);
+    assert!(info.contains("acme/lib@1.2.0"), "{info}");
+    assert!(info.contains("deps: 1"), "{info}");
+    assert!(info.contains("versions: 2"), "{info}");
+    assert!(info.contains("Fixture package"), "{info}");
+    assert!(info.contains("keywords: fixture"), "{info}");
+    assert!(info.contains("installed: 1.0.0"), "{info}");
+    assert!(info.contains(".tarball:"), "{info}");
+    assert!(info.contains(".shasum:"), "{info}");
+    assert!(info.contains("latest: 1.2.0"), "{info}");
+    assert!(info.contains("Ada <ada@example.test>"), "{info}");
+    assert!(
+        info.contains("Published: 2024-01-02T00:00:00+00:00"),
+        "{info}"
+    );
+    let audit = world.output(dir.path(), &["audit"]);
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&audit.stdout),
+        String::from_utf8_lossy(&audit.stderr)
+    );
+    assert!(!audit.status.success(), "{text}");
+    assert!(text.contains("CVE-2026-1"), "{text}");
+    assert!(text.contains("outdated"), "{text}");
+    assert!(text.contains("outside 1.0.0"), "{text}");
 }

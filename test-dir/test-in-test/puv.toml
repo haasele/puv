@@ -1,0 +1,15 @@
+[project]
+name = "test-in-test"
+php = "8.4"
+
+[dependencies]
+
+[dev-dependencies]
+
+[tool-dependencies]
+
+[scripts]
+
+[package]
+format = "phar"
+entrypoint = "src/main.php"

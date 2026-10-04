@@ -74,8 +74,18 @@ impl PackageCache {
     }
 
     pub fn fetch(&self, url: &str, kind: &str, registry_checksum: Option<&str>) -> Result<Fetched> {
+        self.fetch_named(url, kind, registry_checksum, &download_label(url))
+    }
+
+    pub fn fetch_named(
+        &self,
+        url: &str,
+        kind: &str,
+        registry_checksum: Option<&str>,
+        label: &str,
+    ) -> Result<Fetched> {
         self.gate.enter();
-        let result = self.fetch_inner(url, kind, registry_checksum);
+        let result = self.fetch_inner(url, kind, registry_checksum, label);
         self.gate.leave();
         result
     }
@@ -85,6 +95,7 @@ impl PackageCache {
         url: &str,
         kind: &str,
         registry_checksum: Option<&str>,
+        label: &str,
     ) -> Result<Fetched> {
         if let Some(dir) = self.lookup_url(url) {
             let stamp = fs::read_to_string(dir.join(".ok")).unwrap_or_default();
@@ -96,7 +107,7 @@ impl PackageCache {
                 });
             }
         }
-        let bytes = read_url(&self.client, url)?;
+        let bytes = read_url(&self.client, url, label)?;
         if let Some(expected) = registry_checksum {
             verify_registry_checksum(&bytes, expected)?;
         }
@@ -173,11 +184,27 @@ fn read_index(path: &Path) -> Option<BTreeMap<String, String>> {
     serde_json::from_str(&text).ok()
 }
 
-fn read_url(client: &reqwest::blocking::Client, url: &str) -> Result<Vec<u8>> {
+fn download_label(url: &str) -> String {
+    let name = url
+        .rsplit(['/', '?'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(url);
+    let hex = name.chars().all(|ch| ch.is_ascii_hexdigit());
+    if hex && (name.len() == 40 || name.len() == 64) {
+        "archive".to_string()
+    } else {
+        name.to_string()
+    }
+}
+
+fn read_url(client: &reqwest::blocking::Client, url: &str, label: &str) -> Result<Vec<u8>> {
     if let Some(path) = url.strip_prefix("file://") {
         return fs::read(path).map_err(|err| Error::new(format!("failed to read {path}: {err}")));
     }
-    let response = client
+    let mut progress = puv_core::Progress::new(label);
+    progress.begin();
+    let mut response = client
         .get(url)
         .send()
         .map_err(|err| Error::new(format!("failed to download {url}: {err}")))?;
@@ -187,10 +214,34 @@ fn read_url(client: &reqwest::blocking::Client, url: &str) -> Result<Vec<u8>> {
             response.status()
         )));
     }
-    response
-        .bytes()
-        .map(|bytes| bytes.to_vec())
-        .map_err(|err| Error::new(format!("failed to read {url}: {err}")))
+    if let Some(total) = decoded_length(&response) {
+        progress.set_total(total);
+    }
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 16 * 1024];
+    loop {
+        let read = std::io::Read::read(&mut response, &mut buffer)
+            .map_err(|err| Error::new(format!("failed to read {url}: {err}")))?;
+        if read == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buffer[..read]);
+        progress.advance(read as u64);
+    }
+    progress.finish();
+    Ok(bytes)
+}
+
+fn decoded_length(response: &reqwest::blocking::Response) -> Option<u64> {
+    let encoded = response
+        .headers()
+        .get(reqwest::header::CONTENT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| !value.eq_ignore_ascii_case("identity"));
+    if encoded {
+        return None;
+    }
+    response.content_length()
 }
 
 fn verify_registry_checksum(bytes: &[u8], expected: &str) -> Result<()> {

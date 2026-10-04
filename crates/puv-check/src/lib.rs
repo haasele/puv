@@ -56,11 +56,15 @@ pub fn check(project: &Project) -> Result<Vec<Diagnostic>> {
     Ok(diagnostics)
 }
 
+pub fn file_count(project: &Project) -> usize {
+    php_files(&project.root).len()
+}
+
 pub fn render_text(diagnostics: &[Diagnostic]) -> String {
     let mut out = String::new();
     for diagnostic in diagnostics {
         out.push_str(&format!(
-            "{}:{}: {}[{}]: {}\n",
+            "{}:{}\n  {}[{}]\n  {}\n\n",
             diagnostic.file,
             diagnostic.line,
             diagnostic.severity,

@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
@@ -24,7 +25,11 @@ type Result<T> = std::result::Result<T, Report>;
 
 pub fn run(cli: Cli) -> Result<i32> {
     match cli.command {
-        CliCommand::Init { force } => init(force),
+        CliCommand::Create {
+            template,
+            directory,
+        } => create(template, directory),
+        CliCommand::Init { path, force } => init(path, force),
         CliCommand::Add { package, dev } => add(&package, dev),
         CliCommand::Install { package, dev } => match package {
             Some(package) => add(&package, dev),
@@ -42,6 +47,10 @@ pub fn run(cli: Cli) -> Result<i32> {
         CliCommand::Tool { command } => tool(command),
         CliCommand::Build => build(),
         CliCommand::Package { format } => pack(format),
+        CliCommand::List => list_packages(),
+        CliCommand::Why { package } => why_package(&package),
+        CliCommand::Info { package } => info_package(&package),
+        CliCommand::Audit => audit_packages(),
         CliCommand::Check { format } => check(format.as_deref()),
         CliCommand::Contain { clean } => contain(clean),
         CliCommand::Prune { global, all } => prune(global, all),
@@ -143,8 +152,179 @@ pub fn execute(
     run_status(&mut command)
 }
 
-fn init(force: bool) -> Result<i32> {
+const TEMPLATES: &[(&str, &str, &str)] = &[
+    ("laravel", "laravel/laravel", "Laravel application"),
+    (
+        "codeigniter",
+        "codeigniter4/appstarter",
+        "CodeIgniter 4 application",
+    ),
+    ("symfony", "symfony/skeleton", "Symfony skeleton"),
+    ("slim", "slim/slim-skeleton", "Slim application"),
+];
+
+fn create(template: Option<String>, directory: Option<PathBuf>) -> Result<i32> {
+    let name = match template {
+        Some(name) => name,
+        None => prompt_template()?,
+    };
+    let template = TEMPLATES
+        .iter()
+        .find(|template| template.0.eq_ignore_ascii_case(&name))
+        .copied()
+        .ok_or_else(|| {
+            Report::msg(format!(
+                "unknown template '{name}'. Choose {}",
+                TEMPLATES
+                    .iter()
+                    .map(|template| template.0)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        })?;
     let cwd = std::env::current_dir().map_err(err)?;
+    let directory = match directory {
+        Some(path) => {
+            if path.is_absolute() {
+                path
+            } else {
+                cwd.join(path)
+            }
+        }
+        None if std::io::stdin().is_terminal() => prompt_directory(template.0, &cwd)?,
+        None => cwd.join(template.0),
+    };
+    if directory.exists() && fs::read_dir(&directory).map_err(err)?.next().is_some() {
+        return Err(Report::msg(format!("{} is not empty", directory.display())));
+    }
+    fs::create_dir_all(&directory).map_err(err)?;
+    let dirs = Dirs::from_env();
+    let registry = registry(&dirs)?;
+    let releases = registry.releases(template.1).map_err(err)?;
+    let release = releases
+        .iter()
+        .filter(|release| release.version.is_stable())
+        .max_by(|left, right| left.version.cmp(&right.version))
+        .ok_or_else(|| Report::msg(format!("no stable release for {}", template.1)))?;
+    let dist = release
+        .dist
+        .as_ref()
+        .ok_or_else(|| Report::msg(format!("{} has no dist archive", template.1)))?;
+    let cache = PackageCache::new(dirs.clone()).map_err(err)?;
+    let fetched = cache
+        .fetch_named(
+            &dist.url,
+            &dist.kind,
+            dist.shasum.as_deref(),
+            &format!("{} {}", template.1, release.version),
+        )
+        .map_err(err)?;
+    copy_tree(&fetched.dir, &directory)?;
+    if directory.join("composer.json").is_file() {
+        contain_at(&directory, false)?;
+    }
+    println!(
+        "created {} from {} {}",
+        directory.display(),
+        template.1,
+        release.version
+    );
+    Ok(0)
+}
+
+fn prompt_template() -> Result<String> {
+    if !std::io::stdin().is_terminal() {
+        return Err(Report::msg(
+            "pass a template name, for example `puv create laravel`",
+        ));
+    }
+    eprintln!("Templates");
+    for (index, template) in TEMPLATES.iter().enumerate() {
+        eprintln!(
+            "  {}  {:<14} {}  {}",
+            index + 1,
+            template.0,
+            template.1,
+            template.2
+        );
+    }
+    eprint!("template: ");
+    let _ = std::io::stderr().flush();
+    let line = read_line()?;
+    if let Ok(choice) = line.parse::<usize>() {
+        return TEMPLATES
+            .get(choice.wrapping_sub(1))
+            .map(|template| template.0.to_string())
+            .ok_or_else(|| Report::msg(format!("unknown template '{line}'")));
+    }
+    if TEMPLATES
+        .iter()
+        .any(|template| template.0.eq_ignore_ascii_case(&line))
+    {
+        return Ok(line);
+    }
+    Err(Report::msg(format!("unknown template '{line}'")))
+}
+
+fn prompt_directory(template: &str, cwd: &Path) -> Result<PathBuf> {
+    eprint!("directory [{template}]: ");
+    let _ = std::io::stderr().flush();
+    let line = read_line()?;
+    let name = if line.is_empty() {
+        template
+    } else {
+        line.as_str()
+    };
+    Ok(cwd.join(name))
+}
+
+fn read_line() -> Result<String> {
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).map_err(err)?;
+    Ok(line.trim().to_string())
+}
+
+fn copy_tree(from: &Path, to: &Path) -> Result<()> {
+    let mut pending = vec![from.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(&dir).map_err(err)? {
+            let entry = entry.map_err(err)?;
+            if entry.file_name() == ".ok" {
+                continue;
+            }
+            let path = entry.path();
+            let relative = path.strip_prefix(from).unwrap_or(&path);
+            let dest = to.join(relative);
+            if path.is_dir() {
+                fs::create_dir_all(&dest).map_err(err)?;
+                pending.push(path);
+            } else if path.is_file() {
+                if let Some(parent) = dest.parent() {
+                    fs::create_dir_all(parent).map_err(err)?;
+                }
+                fs::copy(&path, &dest).map_err(err)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn init(path: Option<PathBuf>, force: bool) -> Result<i32> {
+    let cwd = std::env::current_dir().map_err(err)?;
+    let cwd = if let Some(path) = path {
+        let root = if path.is_absolute() {
+            path
+        } else {
+            cwd.join(path)
+        };
+        if root.is_file() {
+            return Err(Report::msg(format!("{} is a file", root.display())));
+        }
+        fs::create_dir_all(&root).map_err(err)?;
+        root
+    } else {
+        cwd
+    };
     let manifest_path = cwd.join("puv.toml");
     if manifest_path.exists() && !force {
         return Err(Report::new(puv_core::Error::AlreadyInitialized {
@@ -254,21 +434,39 @@ fn load(spec: &str) -> Result<i32> {
 fn use_php(spec: &str, global: bool) -> Result<i32> {
     let dirs = Dirs::from_env();
     dirs.ensure().map_err(err)?;
+    let (artifact, php) = puv_runtime::ensure_spec(&dirs, spec).map_err(err)?;
     if global {
-        dirs.write_pin(spec).map_err(err)?;
-        let (artifact, _) = puv_runtime::ensure_spec(&dirs, spec).map_err(err)?;
+        dirs.write_pin(&artifact.version).map_err(err)?;
         println!("global php {}", artifact.version);
         return Ok(0);
     }
     let project = project()?;
-    set_php(&project.manifest_path(), spec).map_err(err)?;
-    if project.lock_path().is_file() || manifest_has_deps(&project)? {
+    set_php(&project.manifest_path(), &artifact.version).map_err(err)?;
+    if project.lock_path().is_file() {
+        retarget_lock(&project, &artifact)?;
+        ensure_shim(&project, &php)?;
+    } else if manifest_has_deps(&project)? {
         relock_and_sync(&project, false, None)?;
     } else {
-        puv_runtime::ensure_spec(&dirs, spec).map_err(err)?;
+        ensure_shim(&project, &php)?;
     }
-    println!("using {spec}");
+    println!("using {}", artifact.version);
     Ok(0)
+}
+
+fn retarget_lock(project: &Project, artifact: &Artifact) -> Result<()> {
+    let manifest = read_manifest(&project.manifest_path()).map_err(err)?;
+    let mut lock = read_lock(project)?;
+    let hash = content_hash(&manifest);
+    if lock.runtime.php == artifact.version && lock.content_hash == hash {
+        return Ok(());
+    }
+    lock.runtime.php = artifact.version.clone();
+    lock.runtime.extensions = artifact.extensions.clone();
+    lock.content_hash = hash;
+    lock.write(&project.lock_path()).map_err(err)?;
+    persist_lockb(project, &lock)?;
+    Ok(())
 }
 
 fn tool(command: ToolCommand) -> Result<i32> {
@@ -395,7 +593,8 @@ fn build() -> Result<i32> {
             true,
         ),
         BuildStep::Builtin => {
-            println!("build ok");
+            let written = write_package(&project, &manifest, None)?;
+            println!("built {}", written.display());
             Ok(0)
         }
     }
@@ -416,6 +615,16 @@ fn pack(format: Option<String>) -> Result<i32> {
     if project.lock_path().is_file() {
         sync_project()?;
     }
+    let written = write_package(&project, &manifest, format)?;
+    println!("packaged {}", written.display());
+    Ok(0)
+}
+
+fn write_package(
+    project: &Project,
+    manifest: &Manifest,
+    format: Option<String>,
+) -> Result<PathBuf> {
     let format = format.unwrap_or_else(|| manifest.package.format.clone());
     let entrypoint = manifest
         .package
@@ -437,16 +646,69 @@ fn pack(format: Option<String>) -> Result<i32> {
         .root
         .join("dist")
         .join(format!("{name}.{extension}"));
-    let written = puv_package::package(&puv_package::PackageRequest {
+    puv_package::package(&puv_package::PackageRequest {
         root: &project.root,
         name,
         entrypoint,
         format,
         output,
     })
-    .map_err(err)?;
-    println!("packaged {}", written.display());
+    .map_err(err)
+}
+
+fn list_packages() -> Result<i32> {
+    let project = project()?;
+    let manifest = read_manifest(&project.manifest_path()).map_err(err)?;
+    let lock = project
+        .lock_path()
+        .is_file()
+        .then(|| read_lock(&project))
+        .transpose()?;
+    print!("{}", crate::inspect::render_list(&manifest, lock.as_ref()));
     Ok(0)
+}
+
+fn why_package(name: &str) -> Result<i32> {
+    let project = project()?;
+    let manifest = read_manifest(&project.manifest_path()).map_err(err)?;
+    let lock = read_lock(&project)?;
+    match crate::inspect::render_why(&manifest, &lock, name) {
+        Ok(text) => {
+            print!("{text}");
+            Ok(0)
+        }
+        Err(message) => Err(Report::msg(message)),
+    }
+}
+
+fn info_package(query: &str) -> Result<i32> {
+    let project = project().ok();
+    let lock = project
+        .as_ref()
+        .filter(|project| project.lock_path().is_file())
+        .map(read_lock)
+        .transpose()?;
+    let dirs = Dirs::from_env();
+    let registry = registry(&dirs)?;
+    match crate::inspect::render_info(&registry, lock.as_ref(), query) {
+        Ok(text) => {
+            print!("{text}");
+            Ok(0)
+        }
+        Err(message) => Err(Report::msg(message)),
+    }
+}
+
+fn audit_packages() -> Result<i32> {
+    let project = project()?;
+    let manifest = read_manifest(&project.manifest_path()).map_err(err)?;
+    let lock = read_lock(&project)?;
+    let dirs = Dirs::from_env();
+    let registry = registry(&dirs)?;
+    let (text, vulnerable) =
+        crate::inspect::render_audit(&registry, &manifest, &lock).map_err(Report::msg)?;
+    print!("{text}");
+    Ok(if vulnerable { 1 } else { 0 })
 }
 
 fn check(format: Option<&str>) -> Result<i32> {
@@ -454,8 +716,29 @@ fn check(format: Option<&str>) -> Result<i32> {
     let diagnostics = puv_check::check(&project).map_err(err)?;
     if format == Some("json") {
         println!("{}", puv_check::render_json(&diagnostics).map_err(err)?);
-    } else if !diagnostics.is_empty() {
-        print!("{}", puv_check::render_text(&diagnostics));
+    } else {
+        if !diagnostics.is_empty() {
+            print!("{}", puv_check::render_text(&diagnostics));
+        }
+        let files = puv_check::file_count(&project);
+        let errors = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == "error")
+            .count();
+        let warnings = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == "warning")
+            .count();
+        let files = if files == 1 {
+            "1 file".to_string()
+        } else {
+            format!("{files} files")
+        };
+        if errors == 0 && warnings == 0 {
+            println!("checked {files}, no issues");
+        } else {
+            println!("{errors} errors, {warnings} warnings in {files}");
+        }
     }
     Ok(if puv_check::has_errors(&diagnostics) {
         1
@@ -466,7 +749,11 @@ fn check(format: Option<&str>) -> Result<i32> {
 
 fn contain(clean: bool) -> Result<i32> {
     let cwd = std::env::current_dir().map_err(err)?;
-    if cwd.join("puv.toml").is_file() {
+    contain_at(&cwd, clean)
+}
+
+fn contain_at(root: &Path, clean: bool) -> Result<i32> {
+    if root.join("puv.toml").is_file() {
         return Err(Report::msg("puv.toml already exists"));
     }
     let dirs = Dirs::from_env();
@@ -481,16 +768,30 @@ fn contain(clean: bool) -> Result<i32> {
             .map(|artifact| artifact.version)
             .collect(),
     };
-    let migration = puv_contain::migrate(&cwd, &versions).map_err(err)?;
-    write_atomic(&cwd.join("puv.toml"), render_manifest(&migration.manifest)).map_err(err)?;
-    migration.lock.write(&cwd.join("puv.lock")).map_err(err)?;
+    let spinner = puv_core::Spinner::start("reading composer.json");
+    let migration = puv_contain::migrate(root, &versions).map_err(err)?;
+    let lock = match migration.lock {
+        Some(lock) => {
+            spinner.set("folding composer.lock into puv.lock");
+            lock
+        }
+        None => {
+            spinner.set("resolving dependencies");
+            resolve_lock(&dirs, &migration.manifest, None, false, None)?
+        }
+    };
+    spinner.set("writing puv.toml");
+    write_atomic(&root.join("puv.toml"), render_manifest(&migration.manifest)).map_err(err)?;
+    lock.write(&root.join("puv.lock")).map_err(err)?;
+    if clean {
+        spinner.set("removing composer files");
+        puv_contain::clean_composer_files(root).map_err(err)?;
+    }
+    spinner.finish();
     for warning in &migration.warnings {
         eprintln!("warning: {warning}");
     }
-    if clean {
-        puv_contain::clean_composer_files(&cwd).map_err(err)?;
-    }
-    println!("contained {} packages", migration.lock.packages.len());
+    println!("contained {} packages", lock.packages.len());
     Ok(0)
 }
 
@@ -508,36 +809,67 @@ fn php(command: PhpCommand) -> Result<i32> {
     let dirs = Dirs::from_env();
     dirs.ensure().map_err(err)?;
     match command {
-        PhpCommand::List => {
-            let artifacts = index(&dirs)?;
-            let installed = puv_runtime::installed_versions(&dirs);
-            let mut versions: Vec<_> = artifacts
-                .iter()
-                .map(|artifact| artifact.version.clone())
-                .collect();
-            versions.sort_by(|left, right| puv_runtime::cmp_version(left, right));
-            versions.dedup();
-            for version in versions {
-                let state = if installed.iter().any(|item| item == &version) {
-                    "installed"
-                } else {
-                    "available"
-                };
-                println!("{version}  {state}");
-            }
-            Ok(0)
-        }
-        PhpCommand::Install { version } => {
-            let (artifact, _) = puv_runtime::ensure_spec(&dirs, &version).map_err(err)?;
-            println!("installed php {}", artifact.version);
-            Ok(0)
-        }
-        PhpCommand::Remove { version } => {
-            let removed = puv_runtime::remove(&dirs, &version).map_err(err)?;
-            println!("removed php {removed}");
-            Ok(0)
+        PhpCommand::List { all } => php_list(&dirs, all),
+        PhpCommand::Install { version, all } => php_install(&dirs, version, all),
+        PhpCommand::Remove { version, all } => php_remove(&dirs, version, all),
+    }
+}
+
+fn php_list(dirs: &Dirs, all: bool) -> Result<i32> {
+    let artifacts = index(dirs)?;
+    let installed = puv_runtime::installed_versions(dirs);
+    let mut versions: Vec<String> = artifacts
+        .iter()
+        .map(|artifact| artifact.version.clone())
+        .collect();
+    for version in &installed {
+        if !versions.iter().any(|item| item == version) {
+            versions.push(version.clone());
         }
     }
+    versions.sort_by(|left, right| puv_runtime::cmp_version(left, right));
+    versions.dedup();
+    for version in versions {
+        let is_installed = installed.iter().any(|item| item == &version);
+        if !all && !is_installed {
+            continue;
+        }
+        println!("{version}  {}", php_status(is_installed));
+    }
+    Ok(0)
+}
+
+fn php_install(dirs: &Dirs, version: Option<String>, all: bool) -> Result<i32> {
+    if version.is_none() && !all {
+        return Err(Report::msg("pass a PHP version or --all"));
+    }
+    let artifacts = index(dirs)?;
+    let matched = puv_runtime::matching_artifacts(&artifacts, version.as_deref()).map_err(err)?;
+    for artifact in matched {
+        puv_runtime::install(dirs, artifact).map_err(err)?;
+        println!("installed php {}", artifact.version);
+    }
+    Ok(0)
+}
+
+fn php_remove(dirs: &Dirs, version: Option<String>, all: bool) -> Result<i32> {
+    if version.is_none() && !all {
+        return Err(Report::msg("pass a PHP version or --all"));
+    }
+    let removed = puv_runtime::remove(dirs, version.as_deref()).map_err(err)?;
+    for version in removed {
+        println!("removed php {version}");
+    }
+    Ok(0)
+}
+
+fn php_status(installed: bool) -> String {
+    let (text, color) = if installed {
+        ("installed", "32")
+    } else {
+        ("installation required", "33")
+    };
+    puv_core::paint(text, color, puv_core::stdout_is_tty())
 }
 
 fn relock_and_sync(project: &Project, upgrade: bool, only: Option<&str>) -> Result<()> {
@@ -663,7 +995,12 @@ fn fetch_locked(cache: &PackageCache, releases: &[PackageRelease]) -> Result<Vec
 fn locked_from_release(cache: &PackageCache, release: &PackageRelease) -> Result<LockedPackage> {
     let (source, source_type, registry_checksum, checksum) = if let Some(dist) = &release.dist {
         let fetched = cache
-            .fetch(&dist.url, &dist.kind, dist.shasum.as_deref())
+            .fetch_named(
+                &dist.url,
+                &dist.kind,
+                dist.shasum.as_deref(),
+                &format!("{} {}", release.name, release.version),
+            )
             .map_err(err)?;
         (
             dist.url.clone(),
@@ -908,18 +1245,31 @@ fn manifest_has_deps(project: &Project) -> Result<bool> {
 fn as_php_file(project: Option<&Project>, head: &str) -> Option<PathBuf> {
     let direct = PathBuf::from(head);
     if direct.is_file() {
-        return Some(direct);
+        return Some(absolute_from_cwd(&direct));
     }
     if let Some(project) = project {
         let nested = project.root.join(head);
         if nested.is_file() {
-            return Some(nested);
+            return Some(absolute_from_cwd(&nested));
         }
     }
     if head.ends_with(".php") {
-        Some(direct)
+        Some(absolute_from_cwd(&direct))
     } else {
         None
+    }
+}
+
+/// `puv run` changes the working directory to the project root. A relative
+/// script path would then be opened there, not in the directory the user
+/// invoked the command from.
+fn absolute_from_cwd(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|dir| dir.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
     }
 }
 

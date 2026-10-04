@@ -49,6 +49,8 @@ Zusätzlich: `puv -c '...'` und `puv script.php` (gleichbedeutend mit `puv run s
 
 | Befehl | Verhalten |
 | --- | --- |
+| `puv init [dir]` | Legt das Projekt im aktuellen Verzeichnis oder in `dir` an |
+| `puv create [template] [dir]` | Holt ein Anwendungsgerüst (laravel, codeigniter, symfony, slim). Ohne Namen fragt ein Terminal nach |
 | `puv add <pkg>` | `puv.toml` ändern, auflösen, `puv.lock` schreiben, Umgebung synchronisieren |
 | `puv add --dev <pkg>` | wie `add`, in `[dev-dependencies]` |
 | `puv install <pkg>` | Alias für `add` |
@@ -58,11 +60,19 @@ Zusätzlich: `puv -c '...'` und `puv script.php` (gleichbedeutend mit `puv run s
 | `puv lock --upgrade` | Löst den gesamten Graphen neu |
 | `puv lock <pkg>` | Hebt nur dieses Paket innerhalb seiner Constraint an |
 | `puv remove <pkg>` | Austragen, neu locken, synchronisieren |
-| `puv use <version>` | Schreibt `[project].php` und installiert die Runtime bei Bedarf |
-| `puv use --global <version>` | Setzt den Benutzer-Pin |
+| `puv use <version>` | Installiert die passende Runtime und schreibt die konkrete Version. `8.1` wird zum neuesten 8.1-Patch, `8.1.33` bleibt 8.1.33. `.puv/bin/php` zeigt darauf |
+| `puv use --global <version>` | Setzt den Benutzer-Pin auf die konkrete Runtime |
+| `puv php list` | Nur installierte Runtimes, Status `installed` |
+| `puv php list --all` | Zusätzlich fehlende Versionen als `installation required` |
+| `puv php install 8.3` | Installiert jede verfügbare 8.3.x-Version. `8.3.32` nur diesen Patch. `--all` ohne Version installiert den ganzen Index und ändert neben einer Version nichts |
+| `puv php remove 8.3` | Entfernt jede installierte 8.3.x-Version. `8.3.32` nur diesen Patch. `--all` ohne Version entfernt jede von puv installierte Runtime |
+| `puv list` | Installierte Pakete, Extensions und ihre Dependencies |
+| `puv why <pkg>` | Zeigt, warum ein Paket oder eine Extension installiert ist |
+| `puv info <pkg>` | Registry-Informationen zu einem Paket |
+| `puv audit` | Schwachstellen, veraltete Pakete und mögliche Upgrades |
 | `puv run <args>` | Datei, dann `[scripts]`, dann projektlokale Tools, dann `.puv/bin`, dann der Befehl |
 | `puv run build` | Projektscript `build` |
-| `puv build` | Pipeline: Lock prüfen, `sync`, dann das Script `build` oder den Builtin-Schritt |
+| `puv build` | Pipeline: Lock prüfen, `sync`, dann das Script `build`. Ohne Script wird das Paket nach `dist/` geschrieben |
 | `puv load <pkg>` | Isoliertes projektlokales Tool unter `[tool-dependencies]` |
 | `puv tool install <pkg>` | Isoliertes globales Tool |
 | `puv contain` | Migriert `composer.json` / `composer.lock` ohne die Originale zu löschen |
@@ -158,7 +168,7 @@ Integrität: ist `dist.shasum` gesetzt (SHA-1 oder SHA-256, erkannt an der Läng
 
 ## Migration
 
-`puv contain` übernimmt `require`, `require-dev` und den bereits gelockten Graphen aus `composer.lock`, ohne neu aufzulösen. Einfache String-Scripts werden kopiert. PHP-Callables, `@composer`-Aufrufe und Plugin-Events werden mit einer Warnung übersprungen. Die Composer-Dateien bleiben, bis `puv contain --clean` sie entfernt.
+`puv contain` übernimmt `require`, `require-dev` und, falls vorhanden, den bereits gelockten Graphen aus `composer.lock`, ohne neu aufzulösen. Fehlt `composer.lock`, werden die Abhängigkeiten aus `composer.json` aufgelöst und nach `puv.lock` geschrieben. Einfache String-Scripts werden kopiert. PHP-Callables, `@composer`-Aufrufe und Plugin-Events werden mit einer Warnung übersprungen. Die Composer-Dateien bleiben, bis `puv contain --clean` sie entfernt.
 
 ## Grenzen
 

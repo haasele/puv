@@ -20,8 +20,17 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Create a puv.toml project in the current directory.
+    /// Create a project from an application template.
+    Create {
+        /// laravel, codeigniter, symfony, or slim. Prompts in a terminal when omitted.
+        template: Option<String>,
+        /// Directory to create. Defaults to the template name.
+        directory: Option<PathBuf>,
+    },
+    /// Create a puv.toml project.
     Init {
+        /// Directory to create and initialize. Defaults to the current directory.
+        path: Option<PathBuf>,
         /// Overwrite an existing puv.toml.
         #[arg(long)]
         force: bool,
@@ -86,6 +95,14 @@ pub enum Command {
         #[arg(long)]
         format: Option<String>,
     },
+    /// List installed packages, extensions, and their dependencies.
+    List,
+    /// Show why a package or extension is installed.
+    Why { package: String },
+    /// Show registry information for a package.
+    Info { package: String },
+    /// Report vulnerabilities, outdated packages, and available upgrades.
+    Audit,
     /// Check PHP syntax and project consistency.
     Check {
         /// text or json.
@@ -128,12 +145,28 @@ pub enum ToolCommand {
 
 #[derive(Subcommand)]
 pub enum PhpCommand {
-    /// List available and installed PHP versions.
-    List,
-    /// Download and install a PHP version.
-    Install { version: String },
-    /// Remove an installed PHP version.
-    Remove { version: String },
+    /// List installed PHP versions.
+    List {
+        /// Also show versions that are not installed yet.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Download and install PHP versions.
+    Install {
+        /// Minor line or exact patch. A minor line installs every matching patch.
+        version: Option<String>,
+        /// Install every indexed version. Ignored when a version is given.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Remove installed PHP versions.
+    Remove {
+        /// Minor line or exact patch. A minor line removes every matching patch.
+        version: Option<String>,
+        /// Remove every PHP runtime installed by puv. Ignored when a version is given.
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 pub fn direct_script(args: &[String]) -> Option<(String, Vec<String>)> {
@@ -187,6 +220,7 @@ fn is_command(name: &str) -> bool {
     matches!(
         name,
         "init"
+            | "create"
             | "add"
             | "install"
             | "remove"
@@ -199,6 +233,10 @@ fn is_command(name: &str) -> bool {
             | "build"
             | "package"
             | "check"
+            | "list"
+            | "why"
+            | "info"
+            | "audit"
             | "contain"
             | "prune"
             | "php"

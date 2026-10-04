@@ -268,14 +268,18 @@ pub fn select<'a>(artifacts: &'a [Artifact], spec: &str) -> Result<&'a Artifact>
 
 pub fn install(dirs: &Dirs, artifact: &Artifact) -> Result<PathBuf> {
     dirs.ensure()?;
+    let dest = dirs.runtimes().join(&artifact.version);
+    let php = dest.join("php");
+    if php.is_file() {
+        ensure_executable(&php)?;
+        return Ok(php);
+    }
     let archive = archive_path(dirs, artifact);
     if !archive.is_file() {
         download_archive(artifact, &archive)?;
     } else if let Some(expected) = &artifact.sha256 {
         verify_file(&archive, expected)?;
     }
-    let dest = dirs.runtimes().join(&artifact.version);
-    let php = dest.join("php");
     if !php.is_file() {
         if dest.exists() {
             fs::remove_dir_all(&dest)
@@ -321,32 +325,79 @@ pub fn php_bin(dirs: &Dirs, version: &str) -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
-pub fn remove(dirs: &Dirs, spec: &str) -> Result<String> {
-    let installed = installed_versions(dirs);
-    let request = PhpRequest::parse(spec)?;
-    let version = installed
+pub fn matching_artifacts<'a>(
+    artifacts: &'a [Artifact],
+    spec: Option<&str>,
+) -> Result<Vec<&'a Artifact>> {
+    let request = spec.map(PhpRequest::parse).transpose()?;
+    let mut matched: Vec<_> = artifacts
         .iter()
-        .filter(|version| request.matches(version))
-        .max_by(|left, right| cmp_version(left, right))
-        .cloned()
-        .ok_or_else(|| Error::new(format!("PHP {spec} is not installed")))?;
-    let dest = dirs.runtimes().join(&version);
-    fs::remove_dir_all(&dest)
-        .map_err(|err| Error::new(format!("failed to remove {}: {err}", dest.display())))?;
-    if let Ok(artifacts) = load_index(dirs)
-        && let Some(artifact) = artifacts
+        .filter(|artifact| {
+            artifact.target == current_target()
+                && request
+                    .as_ref()
+                    .is_none_or(|request| request.matches(&artifact.version))
+        })
+        .collect();
+    matched.sort_by(|left, right| cmp_version(&left.version, &right.version));
+    matched.dedup_by(|left, right| left.version == right.version);
+    if matched.is_empty() {
+        return Err(Error::new(match spec {
+            Some(spec) => format!("no PHP runtime matching {spec} for {}", current_target()),
+            None => format!("no PHP runtime for {}", current_target()),
+        }));
+    }
+    Ok(matched)
+}
+
+pub fn remove(dirs: &Dirs, spec: Option<&str>) -> Result<Vec<String>> {
+    let request = spec.map(PhpRequest::parse).transpose()?;
+    let mut versions: Vec<String> = installed_versions(dirs)
+        .into_iter()
+        .filter(|version| {
+            request
+                .as_ref()
+                .is_none_or(|request| request.matches(version))
+        })
+        .collect();
+    if versions.is_empty() {
+        return Err(Error::new(match spec {
+            Some(spec) => format!("PHP {spec} is not installed"),
+            None => "no PHP runtime is installed".to_string(),
+        }));
+    }
+    versions.sort_by(|left, right| cmp_version(left, right));
+    let artifacts = load_index(dirs).unwrap_or_default();
+    for version in &versions {
+        let dest = dirs.runtimes().join(version);
+        if dest.exists() {
+            fs::remove_dir_all(&dest)
+                .map_err(|err| Error::new(format!("failed to remove {}: {err}", dest.display())))?;
+        }
+        if let Some(artifact) = artifacts
             .iter()
-            .find(|artifact| artifact.version == version)
-    {
-        let archive = archive_path(dirs, artifact);
-        if archive.is_file() {
-            fs::remove_file(archive).ok();
+            .find(|artifact| artifact.version == *version && artifact.target == current_target())
+        {
+            let archive = archive_path(dirs, artifact);
+            if archive.is_file() {
+                fs::remove_file(archive).ok();
+            }
         }
     }
-    Ok(version)
+    Ok(versions)
 }
 
 pub fn ensure_spec(dirs: &Dirs, spec: &str) -> Result<(Artifact, PathBuf)> {
+    if std::env::var("PUV_RUNTIME_INDEX").is_err()
+        && index_is_fresh(dirs)
+        && let Ok(artifacts) = load_index(dirs)
+        && let Ok(artifact) = select(&artifacts, spec)
+    {
+        let php = dirs.runtimes().join(&artifact.version).join("php");
+        if php.is_file() {
+            return Ok((artifact.clone(), php));
+        }
+    }
     let artifacts = if std::env::var("PUV_RUNTIME_INDEX").is_ok() {
         load_index(dirs)?
     } else {
@@ -358,6 +409,19 @@ pub fn ensure_spec(dirs: &Dirs, spec: &str) -> Result<(Artifact, PathBuf)> {
     let artifact = select(&artifacts, spec)?.clone();
     let bin = install(dirs, &artifact)?;
     Ok((artifact, bin))
+}
+
+fn index_is_fresh(dirs: &Dirs) -> bool {
+    let Ok(meta) = fs::metadata(index_cache(dirs)) else {
+        return false;
+    };
+    let Ok(modified) = meta.modified() else {
+        return false;
+    };
+    modified
+        .elapsed()
+        .map(|age| age < std::time::Duration::from_secs(24 * 60 * 60))
+        .unwrap_or(false)
 }
 
 fn archive_path(dirs: &Dirs, artifact: &Artifact) -> PathBuf {
@@ -433,7 +497,9 @@ fn download_archive(artifact: &Artifact, dest: &Path) -> Result<()> {
         fs::read(path).map_err(|err| Error::new(format!("failed to read {path}: {err}")))?
     } else {
         let client = http_client()?;
-        let response = client
+        let mut progress = puv_core::Progress::new(format!("php {}", artifact.version));
+        progress.begin();
+        let mut response = client
             .get(&artifact.url)
             .send()
             .map_err(|err| Error::new(format!("failed to download {}: {err}", artifact.url)))?;
@@ -444,10 +510,22 @@ fn download_archive(artifact: &Artifact, dest: &Path) -> Result<()> {
                 response.status()
             )));
         }
-        response
-            .bytes()
-            .map_err(|err| Error::new(format!("failed to read {}: {err}", artifact.url)))?
-            .to_vec()
+        if let Some(total) = response_length(&response) {
+            progress.set_total(total);
+        }
+        let mut bytes = Vec::new();
+        let mut buffer = [0u8; 16 * 1024];
+        loop {
+            let read = std::io::Read::read(&mut response, &mut buffer)
+                .map_err(|err| Error::new(format!("failed to read {}: {err}", artifact.url)))?;
+            if read == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buffer[..read]);
+            progress.advance(read as u64);
+        }
+        progress.finish();
+        bytes
     };
     let actual = sha256_hex(&bytes);
     if let Some(expected) = &artifact.sha256
@@ -464,6 +542,18 @@ fn download_archive(artifact: &Artifact, dest: &Path) -> Result<()> {
     fs::rename(&tmp, dest)
         .map_err(|err| Error::new(format!("failed to store runtime archive: {err}")))?;
     Ok(())
+}
+
+fn response_length(response: &reqwest::blocking::Response) -> Option<u64> {
+    let encoded = response
+        .headers()
+        .get(reqwest::header::CONTENT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| !value.eq_ignore_ascii_case("identity"));
+    if encoded {
+        return None;
+    }
+    response.content_length()
 }
 
 fn verify_file(path: &Path, expected: &str) -> Result<()> {
@@ -587,6 +677,16 @@ pub fn cmp_version(left: &str, right: &str) -> std::cmp::Ordering {
 mod tests {
     use super::*;
 
+    fn artifact(version: &str) -> Artifact {
+        Artifact {
+            version: version.into(),
+            target: current_target().into(),
+            url: format!("file://{version}"),
+            sha256: None,
+            extensions: vec!["json".into()],
+        }
+    }
+
     #[test]
     fn selects_highest_patch_on_the_minor_line() {
         let artifacts = vec![
@@ -614,6 +714,60 @@ mod tests {
         ];
         let selected = select(&artifacts, "8.4").unwrap();
         assert_eq!(selected.version, "8.4.23");
+        let exact = select(&artifacts, "8.4.1").unwrap();
+        assert_eq!(exact.version, "8.4.1");
+    }
+
+    #[test]
+    fn remove_drops_one_patch_or_the_whole_minor_line() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = Dirs {
+            cache: root.path().join("cache"),
+            data: root.path().join("data"),
+            bins: root.path().join("bin"),
+        };
+        dirs.ensure().unwrap();
+        for version in ["8.2.1", "8.2.32", "8.3.1"] {
+            let dir = dirs.runtimes().join(version);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("php"), b"php").unwrap();
+        }
+        assert_eq!(
+            remove(&dirs, Some("8.2.1")).unwrap(),
+            vec!["8.2.1".to_string()]
+        );
+        assert!(!dirs.runtimes().join("8.2.1").exists());
+        assert!(dirs.runtimes().join("8.2.32/php").is_file());
+        fs::create_dir_all(dirs.runtimes().join("8.2.1")).unwrap();
+        fs::write(dirs.runtimes().join("8.2.1/php"), b"php").unwrap();
+        assert_eq!(
+            remove(&dirs, Some("8.2")).unwrap(),
+            vec!["8.2.1".to_string(), "8.2.32".to_string()]
+        );
+        assert!(!dirs.runtimes().join("8.2.1").exists());
+        assert!(!dirs.runtimes().join("8.2.32").exists());
+        assert!(dirs.runtimes().join("8.3.1/php").is_file());
+        assert_eq!(remove(&dirs, None).unwrap(), vec!["8.3.1".to_string()]);
+        assert!(remove(&dirs, None).is_err());
+    }
+
+    #[test]
+    fn matching_artifacts_expand_a_minor_line() {
+        let artifacts = [artifact("8.4.1"), artifact("8.4.23"), artifact("8.3.20")];
+        let minor: Vec<_> = matching_artifacts(&artifacts, Some("8.4"))
+            .unwrap()
+            .into_iter()
+            .map(|item| item.version.as_str())
+            .collect();
+        assert_eq!(minor, vec!["8.4.1", "8.4.23"]);
+        let exact: Vec<_> = matching_artifacts(&artifacts, Some("8.4.1"))
+            .unwrap()
+            .into_iter()
+            .map(|item| item.version.as_str())
+            .collect();
+        assert_eq!(exact, vec!["8.4.1"]);
+        let all = matching_artifacts(&artifacts, None).unwrap();
+        assert_eq!(all.len(), 3);
     }
 
     #[test]

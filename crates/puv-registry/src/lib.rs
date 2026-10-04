@@ -4,7 +4,7 @@ mod client;
 mod minifier;
 mod model;
 
-pub use client::{HttpRegistry, MemoryRegistry, MetadataProvider};
+pub use client::{Advisory, HttpRegistry, MemoryRegistry, MetadataProvider, parse_advisories};
 pub use model::{Dist, PackageRelease};
 
 use miette::Diagnostic;

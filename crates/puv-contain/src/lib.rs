@@ -29,7 +29,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 pub struct Migration {
     pub manifest: Manifest,
-    pub lock: LockFile,
+    /// Copied from `composer.lock` when that file exists. `None` means the
+    /// caller should resolve `manifest` itself.
+    pub lock: Option<LockFile>,
     pub warnings: Vec<String>,
 }
 
@@ -37,8 +39,15 @@ pub fn migrate(root: &Path, php_versions: &[String]) -> Result<Migration> {
     let composer_path = root.join("composer.json");
     let lock_path = root.join("composer.lock");
     let composer: Value = read_json(&composer_path)?;
-    let locked: Value = read_json(&lock_path)?;
+    let locked = if lock_path.is_file() {
+        Some(read_json(&lock_path)?)
+    } else {
+        None
+    };
     let mut warnings = Vec::new();
+    if locked.is_none() {
+        warnings.push("no composer.lock; resolving dependencies from composer.json".to_string());
+    }
     let name = composer
         .get("name")
         .and_then(Value::as_str)
@@ -90,11 +99,13 @@ pub fn migrate(root: &Path, php_versions: &[String]) -> Result<Migration> {
     };
     let mut packages = Vec::new();
     let mut extensions = BTreeSet::new();
-    for key in ["packages", "packages-dev"] {
-        if let Some(list) = locked.get(key).and_then(Value::as_array) {
-            for item in list {
-                if let Some(package) = locked_package(item, &mut extensions) {
-                    packages.push(package);
+    if let Some(locked) = &locked {
+        for key in ["packages", "packages-dev"] {
+            if let Some(list) = locked.get(key).and_then(Value::as_array) {
+                for item in list {
+                    if let Some(package) = locked_package(item, &mut extensions) {
+                        packages.push(package);
+                    }
                 }
             }
         }
@@ -102,7 +113,7 @@ pub fn migrate(root: &Path, php_versions: &[String]) -> Result<Migration> {
     packages.sort_by(|left, right| left.name.cmp(&right.name));
     packages.dedup_by(|left, right| left.name == right.name);
     let hash = content_hash(&manifest);
-    let lock = LockFile {
+    let lock = locked.map(|_| LockFile {
         lock_version: LOCK_VERSION,
         content_hash: hash,
         runtime: LockedRuntime {
@@ -111,7 +122,7 @@ pub fn migrate(root: &Path, php_versions: &[String]) -> Result<Migration> {
         },
         packages,
         tools: Vec::new(),
-    };
+    });
     Ok(Migration {
         manifest,
         lock,
@@ -394,14 +405,43 @@ mod tests {
             &["8.2.10".into(), "8.3.1".into(), "8.4.23".into()],
         )
         .unwrap();
+        let lock = migration.lock.expect("composer.lock should be copied");
         assert_eq!(migration.manifest.project.php, "8.2");
-        assert_eq!(migration.lock.runtime.php, "8.2.10");
-        assert_eq!(migration.lock.packages.len(), 2);
-        assert_eq!(migration.lock.packages[0].name, "phpunit/phpunit");
-        assert_eq!(migration.lock.packages[1].version, "7.3.0");
+        assert_eq!(lock.runtime.php, "8.2.10");
+        assert_eq!(lock.packages.len(), 2);
+        assert_eq!(lock.packages[0].name, "phpunit/phpunit");
+        assert_eq!(lock.packages[1].version, "7.3.0");
         assert!(migration.manifest.scripts.contains_key("test"));
         assert!(!migration.manifest.scripts.contains_key("weird"));
         assert!(!migration.warnings.is_empty());
         assert_eq!(fs::read(dir.path().join("composer.json")).unwrap(), before);
+    }
+
+    #[test]
+    fn migrates_a_project_that_has_no_lockfile() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("composer.json"),
+            r#"{"name":"acme/demo","require":{"php":">=8.3","symfony/console":"^7.0"}}"#,
+        )
+        .unwrap();
+        let migration = migrate(dir.path(), &["8.3.1".into(), "8.4.23".into()]).unwrap();
+        assert!(migration.lock.is_none());
+        assert_eq!(
+            migration
+                .manifest
+                .dependencies
+                .get("symfony/console")
+                .map(String::as_str),
+            Some("^7.0")
+        );
+        assert_eq!(migration.manifest.project.php, "8.3");
+        assert!(
+            migration
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("no composer.lock"))
+        );
+        assert!(!dir.path().join("puv.toml").exists());
     }
 }

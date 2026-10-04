@@ -1,0 +1,89 @@
+lock-version = 1
+content-hash = "sha256:f1c52f734c7ebd240ca897bc34a576da899282dae86e482bb2a3f3a8497335fc"
+
+[runtime]
+php = "8.2.32"
+extensions = [
+    "bcmath",
+    "bz2",
+    "calendar",
+    "core",
+    "ctype",
+    "curl",
+    "date",
+    "dba",
+    "dom",
+    "event",
+    "exif",
+    "fileinfo",
+    "filter",
+    "ftp",
+    "gd",
+    "gmp",
+    "hash",
+    "iconv",
+    "imagick",
+    "imap",
+    "intl",
+    "json",
+    "libxml",
+    "mbregex",
+    "mbstring",
+    "mysqli",
+    "mysqlnd",
+    "opcache",
+    "openssl",
+    "pcntl",
+    "pcre",
+    "pdo",
+    "pdo_mysql",
+    "pgsql",
+    "phar",
+    "posix",
+    "random",
+    "readline",
+    "redis",
+    "reflection",
+    "session",
+    "shmop",
+    "simplexml",
+    "soap",
+    "sockets",
+    "sodium",
+    "spl",
+    "sqlite3",
+    "standard",
+    "swoole",
+    "sysvmsg",
+    "sysvsem",
+    "sysvshm",
+    "tokenizer",
+    "xml",
+    "xmlreader",
+    "xmlwriter",
+    "xsl",
+    "zip",
+    "zlib",
+]
+
+[[package]]
+name = "phpstan/phpstan"
+version = "2.2.17"
+source = "https://api.github.com/repos/phpstan/phpstan/zipball/e676a49fa70cee9f5bf6ff4796186b928a08673f"
+source-type = "zip"
+checksum = "sha256:1b417046f2e7aa0b8b8d51e5b37cf8d96b0142374a55ee3df6220dca1f2524c1"
+dependencies = [
+    "php",
+]
+bins = [
+    "phpstan",
+    "phpstan.phar",
+]
+conflicts = [
+    "phpstan/phpstan-shim *",
+]
+
+[package.autoload]
+files = [
+    "bootstrap.php",
+]

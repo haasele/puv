@@ -18,3 +18,6 @@ sha2.workspace = true
 hex.workspace = true
 regex.workspace = true
 puv-core.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

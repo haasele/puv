@@ -1,0 +1,16 @@
+[project]
+name = "test-dir"
+php = "8.2.32"
+
+[dependencies]
+"phpstan/phpstan" = "^2.2"
+
+[dev-dependencies]
+
+[tool-dependencies]
+
+[scripts]
+
+[package]
+format = "phar"
+entrypoint = "src/main.php"

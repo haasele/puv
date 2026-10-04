@@ -469,6 +469,13 @@ mod tests {
             autoload: puv_core::Autoload::default(),
             bins: Vec::new(),
             dist: None,
+            description: None,
+            homepage: None,
+            licenses: Vec::new(),
+            keywords: Vec::new(),
+            authors: Vec::new(),
+            published: None,
+            package_type: None,
         }
     }
 

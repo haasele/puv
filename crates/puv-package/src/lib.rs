@@ -136,9 +136,13 @@ fn write_phar(
 ) -> Result<()> {
     let alias = format!("{name}.phar");
     let entrypoint = entrypoint.trim_start_matches("./").replace('\\', "/");
-    let stub = format!(
-        "#!/usr/bin/env php\n<?php\nPhar::mapPhar(\"{alias}\");\nrequire 'phar://{alias}/autoload.php';\nrequire 'phar://{alias}/{entrypoint}';\n__HALT_COMPILER(); ?>\r\n"
-    );
+    let mut stub = format!("#!/usr/bin/env php\n<?php\nPhar::mapPhar(\"{alias}\");\n");
+    if files.contains_key("autoload.php") {
+        stub.push_str(&format!("require 'phar://{alias}/autoload.php';\n"));
+    }
+    stub.push_str(&format!(
+        "require 'phar://{alias}/{entrypoint}';\n__HALT_COMPILER(); ?>\r\n"
+    ));
     let mut manifest_body = Vec::new();
     manifest_body.extend_from_slice(&(files.len() as u32).to_le_bytes());
     manifest_body.extend_from_slice(&[0x11, 0x00]);

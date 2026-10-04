@@ -17,4 +17,9 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
-        run: cargo test --workspace
+        run: cargo test --workspace -- --skip end_to_end_pipeline
+      - name: e2e
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y php-cli
+          cargo test -p puv --test workflow end_to_end_pipeline -- --test-threads=1 --nocapture

@@ -5,7 +5,10 @@ mod hash;
 mod lockfile;
 mod manifest;
 mod paths;
+mod progress;
 mod project;
+mod spinner;
+mod style;
 
 pub use error::{Error, Result};
 pub use hash::{content_hash, sha256_hex, sha256_prefixed};
@@ -18,7 +21,10 @@ pub use manifest::{
     set_php, upsert_dependency,
 };
 pub use paths::{Dirs, is_safe_relative};
+pub use progress::Progress;
 pub use project::Project;
+pub use spinner::Spinner;
+pub use style::{paint, stderr_is_tty, stdout_is_tty};
 
 use std::fmt::Write as _;
 

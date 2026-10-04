@@ -169,10 +169,11 @@ fn ensure_artifact(cache: &PackageCache, package: &LockedPackage) -> Result<Path
         return Ok(fetched.dir);
     }
     let fetched = cache
-        .fetch(
+        .fetch_named(
             &package.source,
             &package.source_type,
             package.registry_checksum.as_deref(),
+            &format!("{} {}", package.name, package.version),
         )
         .map_err(|err| Error::new(err.to_string()))?;
     if package.checksum.starts_with("sha256:") && fetched.sha256 != package.checksum {

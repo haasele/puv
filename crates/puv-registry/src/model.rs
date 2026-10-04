@@ -25,6 +25,13 @@ pub struct PackageRelease {
     pub autoload: Autoload,
     pub bins: Vec<String>,
     pub dist: Option<Dist>,
+    pub description: Option<String>,
+    pub homepage: Option<String>,
+    pub licenses: Vec<String>,
+    pub keywords: Vec<String>,
+    pub authors: Vec<String>,
+    pub published: Option<String>,
+    pub package_type: Option<String>,
 }
 
 pub fn releases_from_v2(body: &Value) -> Result<Vec<PackageRelease>> {
@@ -71,6 +78,33 @@ fn release_from_value(fallback_name: &str, value: &Value) -> Result<Option<Packa
         autoload: parse_autoload(value.get("autoload")),
         bins: string_list(value.get("bin")),
         dist: parse_dist(value.get("dist")),
+        description: value
+            .get("description")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string),
+        homepage: value
+            .get("homepage")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string),
+        licenses: license_list(value.get("license")),
+        keywords: string_list(value.get("keywords")),
+        authors: author_list(value.get("authors")),
+        published: value
+            .get("time")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string),
+        package_type: value
+            .get("type")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string),
     }))
 }
 
@@ -85,6 +119,41 @@ fn string_map(value: Option<&Value>) -> BTreeMap<String, String> {
                 .map(|constraint| (puv_core::normalize_name(key), constraint.to_string()))
         })
         .collect()
+}
+
+fn author_list(value: Option<&Value>) -> Vec<String> {
+    let Some(list) = value.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    list.iter()
+        .filter_map(|item| {
+            let name = item
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if name.is_empty() {
+                return None;
+            }
+            let email = item
+                .get("email")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if email.is_empty() {
+                Some(name.to_string())
+            } else {
+                Some(format!("{name} <{email}>"))
+            }
+        })
+        .collect()
+}
+
+fn license_list(value: Option<&Value>) -> Vec<String> {
+    if let Some(text) = value.and_then(Value::as_str) {
+        return vec![text.to_string()];
+    }
+    string_list(value)
 }
 
 fn string_list(value: Option<&Value>) -> Vec<String> {

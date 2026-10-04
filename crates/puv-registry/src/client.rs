@@ -257,6 +257,123 @@ fn read_meta(path: &Path) -> Option<serde_json::Map<String, Value>> {
         .cloned()
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Advisory {
+    pub id: String,
+    pub package: String,
+    pub title: String,
+    pub link: Option<String>,
+    pub cve: Option<String>,
+    pub affected: String,
+    pub severity: Option<String>,
+}
+
+impl HttpRegistry {
+    pub fn advisories(&self, names: &[String]) -> Result<Vec<Advisory>> {
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
+        let url = advisory_url(&self.base, names);
+        self.gate.enter();
+        let response = self.client.get(&url).send();
+        self.gate.leave();
+        let response = response
+            .map_err(|err| Error::new(format!("failed to fetch security advisories: {err}")))?;
+        if !response.status().is_success() {
+            return Err(Error::new(format!(
+                "security advisories returned {} for {url}",
+                response.status()
+            )));
+        }
+        let body: Value = response
+            .json()
+            .map_err(|err| Error::new(format!("invalid security advisories: {err}")))?;
+        Ok(parse_advisories(&body))
+    }
+}
+
+pub fn parse_advisories(body: &Value) -> Vec<Advisory> {
+    let Some(groups) = body.get("advisories").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut advisories = Vec::new();
+    for (package, items) in groups {
+        let Some(items) = items.as_array() else {
+            continue;
+        };
+        for item in items {
+            let package = item
+                .get("packageName")
+                .and_then(Value::as_str)
+                .unwrap_or(package);
+            let title = item
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("security advisory")
+                .to_string();
+            let id = item
+                .get("advisoryId")
+                .or_else(|| item.get("advisory_id"))
+                .and_then(Value::as_str)
+                .unwrap_or(&title)
+                .to_string();
+            advisories.push(Advisory {
+                id,
+                package: puv_core::normalize_name(package),
+                title,
+                link: item.get("link").and_then(Value::as_str).map(str::to_string),
+                cve: item
+                    .get("cve")
+                    .and_then(Value::as_str)
+                    .filter(|cve| !cve.is_empty())
+                    .map(str::to_string),
+                affected: item
+                    .get("affectedVersions")
+                    .or_else(|| item.get("affected_versions"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("*")
+                    .to_string(),
+                severity: item
+                    .get("severity")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            });
+        }
+    }
+    advisories.sort_by(|left, right| (&left.package, &left.id).cmp(&(&right.package, &right.id)));
+    advisories
+}
+
+fn advisory_url(base: &str, names: &[String]) -> String {
+    let host = if base.contains("://repo.packagist.org") {
+        "https://packagist.org"
+    } else {
+        base.trim_end_matches('/')
+    };
+    let mut url = format!("{host}/api/security-advisories?");
+    for (index, name) in names.iter().enumerate() {
+        if index > 0 {
+            url.push('&');
+        }
+        url.push_str("packages[]=");
+        url.push_str(&form_encode(name));
+    }
+    url
+}
+
+fn form_encode(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
 /// In-memory registry used by tests and by `puv contain` fixtures.
 pub struct MemoryRegistry {
     pub packages: HashMap<String, Vec<PackageRelease>>,
