@@ -16,6 +16,16 @@ cargo install --path crates/puv --locked
 
 Rust 1.92 or newer. The binary is `puv`.
 
+Release builds are published from the Actions tab (Release → Run workflow). The installer reads the latest GitHub release:
+
+```text
+puv-x86_64-unknown-linux-gnu.tar.gz
+puv-aarch64-unknown-linux-gnu.tar.gz
+sha256sums.txt
+```
+
+Each archive contains a single `puv` binary. `sha256sums.txt` is `sha256sum` output: the hash, two spaces, then the file name.
+
 ## A new project
 
 ```shell

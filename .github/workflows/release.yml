@@ -1,0 +1,86 @@
+name: release
+
+# Started only from the Actions tab: Run workflow.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to publish, for example v0.1.0
+        required: true
+        type: string
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            linker: ""
+            strip: strip
+          - target: aarch64-unknown-linux-gnu
+            linker: aarch64-linux-gnu-gcc
+            strip: aarch64-linux-gnu-strip
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: cross compiler
+        if: matrix.linker != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: build
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.linker }}
+          CC_aarch64_unknown_linux_gnu: ${{ matrix.linker }}
+        run: cargo build --release --locked --target ${{ matrix.target }} -p puv
+      - name: package
+        run: |
+          bin="target/${{ matrix.target }}/release/puv"
+          ${{ matrix.strip }} "$bin"
+          stage="$(mktemp -d)"
+          cp "$bin" "$stage/puv"
+          chmod 755 "$stage/puv"
+          tar -C "$stage" -czf "puv-${{ matrix.target }}.tar.gz" puv
+      - uses: actions/upload-artifact@v4
+        with:
+          name: puv-${{ matrix.target }}
+          path: puv-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: puv-*
+          path: dist
+          merge-multiple: true
+      - name: checksums
+        working-directory: dist
+        run: |
+          tag="${{ inputs.tag }}"
+          case "$tag" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "tag must look like v0.1.0" >&2; exit 1 ;;
+          esac
+          sha256sum puv-*.tar.gz > sha256sums.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          name: ${{ inputs.tag }}
+          generate_release_notes: true
+          files: |
+            dist/puv-x86_64-unknown-linux-gnu.tar.gz
+            dist/puv-aarch64-unknown-linux-gnu.tar.gz
+            dist/sha256sums.txt
+          fail_on_unmatched_files: true
